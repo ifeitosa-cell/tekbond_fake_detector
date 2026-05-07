@@ -87,17 +87,15 @@ async function searchYandex(filePath) {
 
     console.log('URL apos upload:', page.url());
 
-    // tenta extrair resultados com thumbs — vários seletores possíveis
     let results = await page.$$eval('.serp-item', els =>
       els.slice(0, 8).map(el => ({
         title: el.querySelector('.serp-item__title')?.innerText || '',
         url:   el.querySelector('a')?.href || '',
         site:  el.querySelector('.serp-item__domain')?.innerText || '',
-        thumb: el.querySelector('img')?.src || el.querySelector('img')?.getAttribute('src') || '',
+        thumb: el.querySelector('img')?.src || '',
       }))
     );
 
-    // seletor alternativo para resultados de sites (CbirSites)
     if (results.length === 0) {
       results = await page.$$eval('.CbirSites-Item', els =>
         els.slice(0, 8).map(el => ({
@@ -107,21 +105,18 @@ async function searchYandex(filePath) {
           thumb: el.querySelector('img')?.src || '',
         }))
       );
-      console.log('Resultados via CbirSites-Item:', results.length);
     }
 
-    // seletor para thumbs de imagens similares (galeria do topo)
-    const thumbs = await page.$$eval('.CbirOtherSizes-Item img, .other-sizes__item img, .cbir-similar__item img, .ImagesApp-SerpItem img', imgs =>
-      imgs.slice(0, 5).map(img => img.src || img.getAttribute('src') || '')
+    const thumbs = await page.$$eval(
+      '.CbirOtherSizes-Item img, .other-sizes__item img, .cbir-similar__item img, .ImagesApp-SerpItem img',
+      imgs => imgs.slice(0, 5).map(img => img.src || img.getAttribute('src') || '')
     ).catch(() => []);
 
-    console.log('Thumbs encontradas:', thumbs.length);
-
     const count = results.length;
-    const score = count >= 5 ? 'high' : count >= 2 ? 'medium' : 'low';
-    console.log('Score:', score, '| Resultados:', count);
+    const verdict = count > 0 ? 'fake' : 'notfound';
 
-    return { score, count, results, thumbs };
+    console.log('Verdict:', verdict, '| Resultados:', count);
+    return { verdict, count, results, thumbs };
   } finally {
     await browser.close();
   }
