@@ -10,7 +10,6 @@ app.use(require('cors')());
 
 const jobs = {};
 
-// rota de teste do playwright
 app.get('/test-playwright', async (req, res) => {
   try {
     const browser = await chromium.launch({ headless: true });
@@ -24,6 +23,12 @@ app.get('/test-playwright', async (req, res) => {
   }
 });
 
+app.get('/result/:id', (req, res) => {
+  const job = jobs[req.params.id];
+  if (!job) return res.status(404).json({ error: 'Job nao encontrado' });
+  res.json(job);
+});
+
 app.post('/verify', async (req, res) => {
   const { image } = req.body;
   if (!image) return res.status(400).json({ error: 'Imagem ausente' });
@@ -33,14 +38,8 @@ app.post('/verify', async (req, res) => {
   runSearch(jobId, image);
 });
 
-app.get('/result/:id', (req, res) => {
-  const job = jobs[req.params.id];
-  if (!job) return res.status(404).json({ error: 'Job não encontrado' });
-  res.json(job);
-});
-
 async function runSearch(jobId, base64Image) {
-  const tmpPath = path.join('/tmp', `${jobId}.jpg`);
+  const tmpPath = path.join('/tmp', jobId + '.jpg');
   try {
     fs.writeFileSync(tmpPath, Buffer.from(base64Image, 'base64'));
     const results = await searchWithRetry(tmpPath, 3);
@@ -69,24 +68,20 @@ async function searchYandex(filePath) {
   try {
     await page.goto('https://yandex.com/images/', { waitUntil: 'networkidle', timeout: 20000 });
 
-    // tira screenshot para ver o que o Yandex está mostrando
-    const shot = await page.screenshot({ encoding: 'base64' });
-    console.log('SCREENSHOT_BASE64:' + shot.substring(0, 100));
-
-    // lista todos os elementos clicáveis para achar o botão certo
     const selectors = await page.$$eval('button, [role="button"], input[type="file"], [data-type]', els =>
       els.map(el => ({
         tag: el.tagName,
-        type: el.type || '',
         dataType: el.getAttribute('data-type') || '',
-        className: el.className.substring(0, 60),
-        text: el.innerText?.substring(0, 30) || ''
+        className: el.className.substring(0, 80),
+        text: (el.innerText || '').substring(0, 30)
       }))
     );
-    console.log('SELECTORS:', JSON.stringify(selectors));
 
+    console.log('SELECTORS:' + JSON.stringify(selectors));
     return { score: 'low', count: 0, results: [], debug: selectors };
   } finally {
     await browser.close();
   }
 }
+
+app.listen(process.env.PORT || 3000, () => console.log('Rodando'));
