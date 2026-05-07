@@ -14,7 +14,7 @@ app.get('/test-playwright', async (req, res) => {
   try {
     const browser = await chromium.launch({ headless: true });
     const page = await browser.newPage();
-    await page.goto('https://yandex.com/images/', { waitUntil: 'networkidle', timeout: 15000 });
+    await page.goto('https://yandex.ru/images/', { waitUntil: 'networkidle', timeout: 15000 });
     const title = await page.title();
     await browser.close();
     res.json({ ok: true, title });
@@ -66,19 +66,58 @@ async function searchYandex(filePath) {
   const browser = await chromium.launch({ headless: true });
   const page = await browser.newPage();
   try {
-    await page.goto('https://yandex.com/images/', { waitUntil: 'networkidle', timeout: 20000 });
+    await page.goto('https://yandex.ru/images/', { waitUntil: 'networkidle', timeout: 20000 });
 
-    const selectors = await page.$$eval('button, [role="button"], input[type="file"], [data-type]', els =>
-      els.map(el => ({
-        tag: el.tagName,
-        dataType: el.getAttribute('data-type') || '',
-        className: el.className.substring(0, 80),
-        text: (el.innerText || '').substring(0, 30)
+    const seletores = [
+      '[data-type="cbir"]',
+      '.cbir-panel__file-input-label',
+      'label[for="cbir-file-input"]',
+      '.SearchForm-IconButton_type_cbir',
+      'input[type="file"]',
+    ];
+
+    let clicou = false;
+    for (const sel of seletores) {
+      try {
+        const el = await page.$(sel);
+        if (el) {
+          console.log('Seletor encontrado:', sel);
+          if (sel === 'input[type="file"]') {
+            await el.setInputFiles(filePath);
+          } else {
+            const [chooser] = await Promise.all([
+              page.waitForEvent('filechooser', { timeout: 5000 }),
+              el.click()
+            ]);
+            await chooser.setFiles(filePath);
+          }
+          clicou = true;
+          break;
+        }
+      } catch (e) {
+        console.log('Seletor falhou:', sel, e.message);
+        continue;
+      }
+    }
+
+    if (!clicou) {
+      throw new Error('Nenhum seletor de upload encontrado no Yandex');
+    }
+
+    await page.waitForNavigation({ waitUntil: 'networkidle', timeout: 20000 });
+
+    const results = await page.$$eval('.serp-item', els =>
+      els.slice(0, 8).map(el => ({
+        title: el.querySelector('.serp-item__title')?.innerText || '',
+        url:   el.querySelector('a')?.href || '',
+        site:  el.querySelector('.serp-item__domain')?.innerText || '',
       }))
     );
 
-    console.log('SELECTORS:' + JSON.stringify(selectors));
-    return { score: 'low', count: 0, results: [], debug: selectors };
+    const count = results.length;
+    const score = count >= 5 ? 'high' : count >= 2 ? 'medium' : 'low';
+    console.log('Score:', score, '| Resultados:', count);
+    return { score, count, results };
   } finally {
     await browser.close();
   }
