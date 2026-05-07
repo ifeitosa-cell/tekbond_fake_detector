@@ -67,26 +67,26 @@ async function searchYandex(filePath) {
   const browser = await chromium.launch({ headless: true });
   const page = await browser.newPage();
   try {
-    await page.goto('https://yandex.com/images/', { waitUntil: 'networkidle' });
-    const [chooser] = await Promise.all([
-      page.waitForEvent('filechooser'),
-      page.click('[data-type="cbir"]')
-    ]);
-    await chooser.setFiles(filePath);
-    await page.waitForNavigation({ waitUntil: 'networkidle', timeout: 15000 });
-    const results = await page.$$eval('.serp-item', els =>
-      els.slice(0, 8).map(el => ({
-        title: el.querySelector('.serp-item__title')?.innerText || '',
-        url:   el.querySelector('a')?.href || '',
-        site:  el.querySelector('.serp-item__domain')?.innerText || '',
+    await page.goto('https://yandex.com/images/', { waitUntil: 'networkidle', timeout: 20000 });
+
+    // tira screenshot para ver o que o Yandex está mostrando
+    const shot = await page.screenshot({ encoding: 'base64' });
+    console.log('SCREENSHOT_BASE64:' + shot.substring(0, 100));
+
+    // lista todos os elementos clicáveis para achar o botão certo
+    const selectors = await page.$$eval('button, [role="button"], input[type="file"], [data-type]', els =>
+      els.map(el => ({
+        tag: el.tagName,
+        type: el.type || '',
+        dataType: el.getAttribute('data-type') || '',
+        className: el.className.substring(0, 60),
+        text: el.innerText?.substring(0, 30) || ''
       }))
     );
-    const count = results.length;
-    const score = count >= 5 ? 'high' : count >= 2 ? 'medium' : 'low';
-    return { score, count, results };
+    console.log('SELECTORS:', JSON.stringify(selectors));
+
+    return { score: 'low', count: 0, results: [], debug: selectors };
   } finally {
     await browser.close();
   }
 }
-
-app.listen(process.env.PORT || 3000, () => console.log('Rodando'));
