@@ -23,6 +23,38 @@ app.get('/test-playwright', async (req, res) => {
   }
 });
 
+app.get('/diagnostico', async (req, res) => {
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage();
+  try {
+    await page.setExtraHTTPHeaders({
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+    });
+
+    await page.goto('https://yandex.ru/images/', { waitUntil: 'networkidle', timeout: 20000 });
+
+    const html = await page.content();
+    const temCaptcha = html.includes('captcha') || html.includes('CheckboxCaptcha');
+    const temBloqueio = html.includes('robot') || html.includes('blocked');
+
+    const seletores = await page.$$eval('*[data-type], input[type="file"], [class*="cbir"]', els =>
+      els.map(el => ({
+        tag: el.tagName,
+        dataType: el.getAttribute('data-type') || '',
+        className: el.className.substring(0, 80),
+      }))
+    );
+
+    const screenshot = await page.screenshot({ encoding: 'base64', fullPage: false });
+
+    await browser.close();
+    res.json({ temCaptcha, temBloqueio, seletoresEncontrados: seletores, screenshot });
+  } catch (err) {
+    await browser.close();
+    res.json({ erro: err.message });
+  }
+});
+
 app.get('/result/:id', (req, res) => {
   const job = jobs[req.params.id];
   if (!job) return res.status(404).json({ error: 'Job nao encontrado' });
@@ -63,10 +95,23 @@ async function searchWithRetry(filePath, attempts) {
 }
 
 async function searchYandex(filePath) {
-  const browser = await chromium.launch({ headless: true });
+  const browser = await chromium.launch({
+    headless: true,
+    args: ['--no-sandbox', '--disable-setuid-sandbox']
+  });
   const page = await browser.newPage();
   try {
+    await page.setExtraHTTPHeaders({
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+      'Accept-Language': 'ru-RU,ru;q=0.9'
+    });
+
     await page.goto('https://yandex.ru/images/', { waitUntil: 'networkidle', timeout: 20000 });
+
+    const html = await page.content();
+    if (html.includes('captcha') || html.includes('CheckboxCaptcha')) {
+      throw new Error('Yandex retornou captcha — bloqueio de bot detectado');
+    }
 
     const seletores = [
       '[data-type="cbir"]',
@@ -96,13 +141,10 @@ async function searchYandex(filePath) {
         }
       } catch (e) {
         console.log('Seletor falhou:', sel, e.message);
-        continue;
       }
     }
 
-    if (!clicou) {
-      throw new Error('Nenhum seletor de upload encontrado no Yandex');
-    }
+    if (!clicou) throw new Error('Nenhum seletor de upload encontrado');
 
     await page.waitForNavigation({ waitUntil: 'networkidle', timeout: 20000 });
 
