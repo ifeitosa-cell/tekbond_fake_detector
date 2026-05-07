@@ -23,38 +23,6 @@ app.get('/test-playwright', async (req, res) => {
   }
 });
 
-app.get('/diagnostico', async (req, res) => {
-  const browser = await chromium.launch({ headless: true });
-  const page = await browser.newPage();
-  try {
-    await page.setExtraHTTPHeaders({
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
-    });
-
-    await page.goto('https://yandex.ru/images/', { waitUntil: 'networkidle', timeout: 20000 });
-
-    const html = await page.content();
-    const temCaptcha = html.includes('captcha') || html.includes('CheckboxCaptcha');
-    const temBloqueio = html.includes('robot') || html.includes('blocked');
-
-    const seletores = await page.$$eval('*[data-type], input[type="file"], [class*="cbir"]', els =>
-      els.map(el => ({
-        tag: el.tagName,
-        dataType: el.getAttribute('data-type') || '',
-        className: el.className.substring(0, 80),
-      }))
-    );
-
-    const screenshot = await page.screenshot({ encoding: 'base64', fullPage: false });
-
-    await browser.close();
-    res.json({ temCaptcha, temBloqueio, seletoresEncontrados: seletores, screenshot });
-  } catch (err) {
-    await browser.close();
-    res.json({ erro: err.message });
-  }
-});
-
 app.get('/result/:id', (req, res) => {
   const job = jobs[req.params.id];
   if (!job) return res.status(404).json({ error: 'Job nao encontrado' });
@@ -88,8 +56,9 @@ async function searchWithRetry(filePath, attempts) {
     try {
       return await searchYandex(filePath);
     } catch (err) {
+      console.log(`Tentativa ${i + 1} falhou:`, err.message);
       if (i === attempts - 1) throw err;
-      await new Promise(r => setTimeout(r, 2000 * (i + 1)));
+      await new Promise(r => setTimeout(r, 3000 * (i + 1)));
     }
   }
 }
@@ -101,53 +70,32 @@ async function searchYandex(filePath) {
   });
   const page = await browser.newPage();
   try {
+    // simula navegador real
     await page.setExtraHTTPHeaders({
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-      'Accept-Language': 'ru-RU,ru;q=0.9'
+      'Accept-Language': 'ru-RU,ru;q=0.9,en;q=0.8',
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
     });
 
     await page.goto('https://yandex.ru/images/', { waitUntil: 'networkidle', timeout: 20000 });
 
-    const html = await page.content();
-    if (html.includes('captcha') || html.includes('CheckboxCaptcha')) {
-      throw new Error('Yandex retornou captcha — bloqueio de bot detectado');
-    }
+    // pequena pausa para parecer humano
+    await page.waitForTimeout(1500);
 
-    const seletores = [
-      '[data-type="cbir"]',
-      '.cbir-panel__file-input-label',
-      'label[for="cbir-file-input"]',
-      '.SearchForm-IconButton_type_cbir',
-      'input[type="file"]',
-    ];
+    // usa o seletor correto encontrado no diagnóstico
+    const fileInput = await page.$('input.CbirCore-FileInput');
+    if (!fileInput) throw new Error('Input CbirCore-FileInput nao encontrado');
 
-    let clicou = false;
-    for (const sel of seletores) {
-      try {
-        const el = await page.$(sel);
-        if (el) {
-          console.log('Seletor encontrado:', sel);
-          if (sel === 'input[type="file"]') {
-            await el.setInputFiles(filePath);
-          } else {
-            const [chooser] = await Promise.all([
-              page.waitForEvent('filechooser', { timeout: 5000 }),
-              el.click()
-            ]);
-            await chooser.setFiles(filePath);
-          }
-          clicou = true;
-          break;
-        }
-      } catch (e) {
-        console.log('Seletor falhou:', sel, e.message);
-      }
-    }
+    console.log('Seletor CbirCore-FileInput encontrado, fazendo upload...');
+    await fileInput.setInputFiles(filePath);
 
-    if (!clicou) throw new Error('Nenhum seletor de upload encontrado');
+    // aguarda a navegação para a página de resultados
+    await page.waitForNavigation({ waitUntil: 'networkidle', timeout: 25000 });
 
-    await page.waitForNavigation({ waitUntil: 'networkidle', timeout: 20000 });
+    const url = page.url();
+    console.log('URL apos upload:', url);
 
+    // extrai resultados
     const results = await page.$$eval('.serp-item', els =>
       els.slice(0, 8).map(el => ({
         title: el.querySelector('.serp-item__title')?.innerText || '',
@@ -156,10 +104,23 @@ async function searchYandex(filePath) {
       }))
     );
 
-    const count = results.length;
+    // tenta seletores alternativos se serp-item nao encontrar nada
+    let finalResults = results;
+    if (results.length === 0) {
+      finalResults = await page.$$eval('.CbirSites-Item, .cbir-sites__item', els =>
+        els.slice(0, 8).map(el => ({
+          title: el.querySelector('a')?.innerText || '',
+          url:   el.querySelector('a')?.href || '',
+          site:  el.querySelector('.CbirSites-ItemDomain, .cbir-sites__item-domain')?.innerText || '',
+        }))
+      );
+      console.log('Resultados via seletor alternativo:', finalResults.length);
+    }
+
+    const count = finalResults.length;
     const score = count >= 5 ? 'high' : count >= 2 ? 'medium' : 'low';
     console.log('Score:', score, '| Resultados:', count);
-    return { score, count, results };
+    return { score, count, results: finalResults };
   } finally {
     await browser.close();
   }
