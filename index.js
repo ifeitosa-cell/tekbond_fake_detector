@@ -70,7 +70,6 @@ async function searchYandex(filePath) {
   });
   const page = await browser.newPage();
   try {
-    // simula navegador real
     await page.setExtraHTTPHeaders({
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
       'Accept-Language': 'ru-RU,ru;q=0.9,en;q=0.8',
@@ -78,49 +77,51 @@ async function searchYandex(filePath) {
     });
 
     await page.goto('https://yandex.ru/images/', { waitUntil: 'networkidle', timeout: 20000 });
-
-    // pequena pausa para parecer humano
     await page.waitForTimeout(1500);
 
-    // usa o seletor correto encontrado no diagnóstico
     const fileInput = await page.$('input.CbirCore-FileInput');
     if (!fileInput) throw new Error('Input CbirCore-FileInput nao encontrado');
 
-    console.log('Seletor CbirCore-FileInput encontrado, fazendo upload...');
     await fileInput.setInputFiles(filePath);
-
-    // aguarda a navegação para a página de resultados
     await page.waitForNavigation({ waitUntil: 'networkidle', timeout: 25000 });
 
-    const url = page.url();
-    console.log('URL apos upload:', url);
+    console.log('URL apos upload:', page.url());
 
-    // extrai resultados
-    const results = await page.$$eval('.serp-item', els =>
+    // tenta extrair resultados com thumbs — vários seletores possíveis
+    let results = await page.$$eval('.serp-item', els =>
       els.slice(0, 8).map(el => ({
         title: el.querySelector('.serp-item__title')?.innerText || '',
         url:   el.querySelector('a')?.href || '',
         site:  el.querySelector('.serp-item__domain')?.innerText || '',
+        thumb: el.querySelector('img')?.src || el.querySelector('img')?.getAttribute('src') || '',
       }))
     );
 
-    // tenta seletores alternativos se serp-item nao encontrar nada
-    let finalResults = results;
+    // seletor alternativo para resultados de sites (CbirSites)
     if (results.length === 0) {
-      finalResults = await page.$$eval('.CbirSites-Item, .cbir-sites__item', els =>
+      results = await page.$$eval('.CbirSites-Item', els =>
         els.slice(0, 8).map(el => ({
-          title: el.querySelector('a')?.innerText || '',
+          title: el.querySelector('.CbirSites-ItemTitle, a')?.innerText || '',
           url:   el.querySelector('a')?.href || '',
-          site:  el.querySelector('.CbirSites-ItemDomain, .cbir-sites__item-domain')?.innerText || '',
+          site:  el.querySelector('.CbirSites-ItemDomain')?.innerText || '',
+          thumb: el.querySelector('img')?.src || '',
         }))
       );
-      console.log('Resultados via seletor alternativo:', finalResults.length);
+      console.log('Resultados via CbirSites-Item:', results.length);
     }
 
-    const count = finalResults.length;
+    // seletor para thumbs de imagens similares (galeria do topo)
+    const thumbs = await page.$$eval('.CbirOtherSizes-Item img, .other-sizes__item img, .cbir-similar__item img, .ImagesApp-SerpItem img', imgs =>
+      imgs.slice(0, 5).map(img => img.src || img.getAttribute('src') || '')
+    ).catch(() => []);
+
+    console.log('Thumbs encontradas:', thumbs.length);
+
+    const count = results.length;
     const score = count >= 5 ? 'high' : count >= 2 ? 'medium' : 'low';
     console.log('Score:', score, '| Resultados:', count);
-    return { score, count, results: finalResults };
+
+    return { score, count, results, thumbs };
   } finally {
     await browser.close();
   }
