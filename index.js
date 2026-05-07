@@ -10,14 +10,26 @@ app.use(require('cors')());
 
 const jobs = {};
 
+// rota de teste do playwright
+app.get('/test-playwright', async (req, res) => {
+  try {
+    const browser = await chromium.launch({ headless: true });
+    const page = await browser.newPage();
+    await page.goto('https://yandex.com/images/', { waitUntil: 'networkidle', timeout: 15000 });
+    const title = await page.title();
+    await browser.close();
+    res.json({ ok: true, title });
+  } catch (err) {
+    res.json({ ok: false, error: err.message });
+  }
+});
+
 app.post('/verify', async (req, res) => {
   const { image } = req.body;
   if (!image) return res.status(400).json({ error: 'Imagem ausente' });
-
   const jobId = crypto.randomUUID();
   jobs[jobId] = { status: 'processing' };
   res.json({ jobId });
-
   runSearch(jobId, image);
 });
 
@@ -54,17 +66,14 @@ async function searchWithRetry(filePath, attempts) {
 async function searchYandex(filePath) {
   const browser = await chromium.launch({ headless: true });
   const page = await browser.newPage();
-
   try {
     await page.goto('https://yandex.com/images/', { waitUntil: 'networkidle' });
-
     const [chooser] = await Promise.all([
       page.waitForEvent('filechooser'),
       page.click('[data-type="cbir"]')
     ]);
     await chooser.setFiles(filePath);
     await page.waitForNavigation({ waitUntil: 'networkidle', timeout: 15000 });
-
     const results = await page.$$eval('.serp-item', els =>
       els.slice(0, 8).map(el => ({
         title: el.querySelector('.serp-item__title')?.innerText || '',
@@ -72,10 +81,8 @@ async function searchYandex(filePath) {
         site:  el.querySelector('.serp-item__domain')?.innerText || '',
       }))
     );
-
     const count = results.length;
     const score = count >= 5 ? 'high' : count >= 2 ? 'medium' : 'low';
-
     return { score, count, results };
   } finally {
     await browser.close();
