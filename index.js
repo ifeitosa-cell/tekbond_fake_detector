@@ -35,49 +35,6 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', uptime: process.uptime() });
 });
 
-// Diagnóstico: inspeciona a página de resultados do Yandex
-app.post('/diagnostico-yandex', verifyLimiter, async (req, res) => {
-  const err = validateImage(req.body.image);
-  if (err) return res.status(400).json(err);
-  const tmpPath = path.join('/tmp', 'diag_' + Date.now() + '.jpg');
-  fs.writeFileSync(tmpPath, Buffer.from(req.body.image, 'base64'));
-  const browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
-  const page = await browser.newPage();
-  try {
-    await page.setExtraHTTPHeaders({
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-      'Accept-Language': 'ru-RU,ru;q=0.9,en;q=0.8',
-    });
-    await page.goto('https://yandex.ru/images/', { waitUntil: 'networkidle', timeout: 20000 });
-    await page.waitForTimeout(1500);
-    const fileInput = await page.$('input.CbirCore-FileInput');
-    if (!fileInput) throw new Error('Input nao encontrado');
-    await fileInput.setInputFiles(tmpPath);
-    await page.waitForNavigation({ waitUntil: 'networkidle', timeout: 25000 });
-
-    const resultado = await page.evaluate(() => {
-      const getClasses = (sel) => Array.from(document.querySelectorAll(sel)).map(e => e.className.substring(0, 80));
-      return {
-        url: window.location.href,
-        temCbirSites:      !!document.querySelector('.CbirSites'),
-        temCbirSitesItem:  document.querySelectorAll('.CbirSites-Item').length,
-        temSerpItem:       document.querySelectorAll('.serp-item').length,
-        temSimilar:        !!document.querySelector('[class*="Similar"], [class*="similar"]'),
-        temOtherSizes:     !!document.querySelector('[class*="OtherSizes"], [class*="otherSizes"]'),
-        titulos:           Array.from(document.querySelectorAll('h2,h3,.CbirSites-Title,.cbir-sites__title')).map(e => e.innerText.trim()).filter(Boolean).slice(0, 8),
-        classesSecoes:     getClasses('[class*="Cbir"],[class*="cbir"]').slice(0, 20),
-      };
-    });
-
-    res.json(resultado);
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  } finally {
-    await browser.close();
-    try { if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath); } catch {}
-  }
-});
-
 app.get('/test-playwright', async (req, res) => {
   try {
     const browser = await chromium.launch({ headless: true });
@@ -123,6 +80,7 @@ app.post('/verify', verifyLimiter, async (req, res) => {
   runSearch(jobId, req.body.image);
 });
 
+// URL temporária para abrir no Google Lens
 app.post('/lens-url', verifyLimiter, (req, res) => {
   const err = validateImage(req.body.image);
   if (err) return res.status(400).json(err);
@@ -133,7 +91,7 @@ app.post('/lens-url', verifyLimiter, (req, res) => {
   try {
     fs.writeFileSync(tmpPath, Buffer.from(req.body.image, 'base64'));
   } catch (e) {
-    return res.status(500).json({ error: 'Erro ao salvar imagem temporaria' });
+    return res.status(500).json({ error: 'Erro ao salvar imagem' });
   }
   const timer = setTimeout(() => {
     try { if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath); } catch {}
@@ -177,7 +135,7 @@ async function runSearch(jobId, base64Image) {
   try {
     fs.writeFileSync(tmpPath, Buffer.from(base64Image, 'base64'));
     const result = await searchWithRetry(tmpPath, 3);
-    jobs[jobId] = { status: 'done', engine: 'yandex', ...result };
+    jobs[jobId] = { status: 'done', ...result };
   } catch (err) {
     jobs[jobId] = { status: 'error', message: err.message };
   } finally {
@@ -221,14 +179,28 @@ async function searchYandex(filePath) {
     });
     await page.goto('https://yandex.ru/images/', { waitUntil: 'networkidle', timeout: 20000 });
     await page.waitForTimeout(1500);
+
     const fileInput = await page.$('input.CbirCore-FileInput');
     if (!fileInput) throw new Error('Seletor CbirCore-FileInput nao encontrado');
     await fileInput.setInputFiles(filePath);
     await page.waitForNavigation({ waitUntil: 'networkidle', timeout: 25000 });
+    console.log('[yandex] URL:', page.url());
 
-    const pageUrl = page.url();
-    console.log('[yandex] URL:', pageUrl);
+    // Detecta tipo de resultado pela presença de seções na página
+    const pageInfo = await page.evaluate(() => {
+      const texto = document.body.innerText || '';
+      return {
+        // "Сайты" = seção de sites onde a imagem foi encontrada (exata)
+        temSites:   texto.includes('Сайты') || texto.includes('сайт'),
+        // "Похожие" = seção de imagens similares (não idênticas)
+        temSimilar: texto.includes('Похожие') || texto.includes('похожие'),
+        temCbirSitesItems: document.querySelectorAll('.CbirSites-Item').length,
+        temSerpItems:      document.querySelectorAll('.serp-item').length,
+      };
+    });
+    console.log('[yandex] pageInfo:', JSON.stringify(pageInfo));
 
+    // Extrai resultados
     let results = await page.$$eval('.serp-item', els =>
       els.slice(0, 13).map(el => ({
         title: el.querySelector('.serp-item__title')?.innerText || '',
@@ -237,7 +209,6 @@ async function searchYandex(filePath) {
         thumb: el.querySelector('img')?.src || '',
       }))
     );
-
     if (results.length === 0) {
       results = await page.$$eval('.CbirSites-Item', els =>
         els.slice(0, 13).map(el => ({
@@ -256,8 +227,22 @@ async function searchYandex(filePath) {
 
     const sanitized = sanitizeResult(results);
     const count = sanitized.length;
-    console.log('[yandex] count:', count);
-    return { verdict: count > 0 ? 'fake' : 'notfound', count, results: sanitized, thumbs: thumbs.filter(isSafeHttpUrl) };
+
+    // Três vereditos:
+    // fake     → tem seção "Сайты" com resultados = imagem idêntica encontrada em sites
+    // similar  → tem seção "Похожие" mas não tem sites = apenas imagens parecidas
+    // notfound → nenhum resultado relevante
+    let verdict;
+    if (pageInfo.temSites && count > 0) {
+      verdict = 'fake';
+    } else if (pageInfo.temSimilar || count > 0) {
+      verdict = 'similar';
+    } else {
+      verdict = 'notfound';
+    }
+
+    console.log('[yandex] verdict:', verdict, '| count:', count);
+    return { verdict, count, results: sanitized, thumbs: thumbs.filter(isSafeHttpUrl) };
   } finally {
     await browser.close();
   }
