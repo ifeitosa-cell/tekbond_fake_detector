@@ -186,21 +186,25 @@ async function searchYandex(filePath) {
     await page.waitForNavigation({ waitUntil: 'networkidle', timeout: 25000 });
     console.log('[yandex] URL:', page.url());
 
-    // Detecta tipo de resultado pela presença de seções na página
+    const finalUrl = page.url();
+
+    // Diferenciação por URL — o Yandex usa cbir_page para indicar o tipo:
+    // cbir_page=similar        → só similares (SIMILAR)
+    // sem cbir_page=similar    → correspondência real (FAKE)
+    // "В других размерах"     → mesma imagem em outros tamanhos (FAKE)
+    const isSimilarPage = finalUrl.includes('cbir_page=similar');
+    console.log('[yandex] isSimilarPage:', isSimilarPage, '| url:', finalUrl);
+
     const pageInfo = await page.evaluate(() => {
       const texto = document.body.innerText || '';
       return {
-        // "Сайты" = seção de sites onde a imagem foi encontrada (exata)
-        temSites:   texto.includes('Сайты') || texto.includes('сайт'),
-        // "Похожие" = seção de imagens similares (não idênticas)
-        temSimilar: texto.includes('Похожие') || texto.includes('похожие'),
-        temCbirSitesItems: document.querySelectorAll('.CbirSites-Item').length,
-        temSerpItems:      document.querySelectorAll('.serp-item').length,
+        temOutrosTamanhos: texto.includes('других размерах') || texto.includes('В других'),
+        temSimilar:        texto.includes('Похожие'),
       };
     });
     console.log('[yandex] pageInfo:', JSON.stringify(pageInfo));
 
-    // Extrai resultados
+    // Extrai resultados de sites (correspondência exata)
     let results = await page.$$eval('.serp-item', els =>
       els.slice(0, 13).map(el => ({
         title: el.querySelector('.serp-item__title')?.innerText || '',
@@ -228,14 +232,16 @@ async function searchYandex(filePath) {
     const sanitized = sanitizeResult(results);
     const count = sanitized.length;
 
-    // Três vereditos:
-    // fake     → tem seção "Сайты" com resultados = imagem idêntica encontrada em sites
-    // similar  → tem seção "Похожие" mas não tem sites = apenas imagens parecidas
-    // notfound → nenhum resultado relevante
+    // 3 vereditos baseados em sinais objetivos do Yandex:
+    // FAKE     → "В других размерах" na página = mesma imagem em outros tamanhos
+    // SIMILAR  → cbir_page=similar na URL = apenas imagens parecidas
+    // NOTFOUND → nenhum sinal relevante encontrado
     let verdict;
-    if (pageInfo.temSites && count > 0) {
+    if (isSimilarPage) {
+      verdict = 'similar';
+    } else if (pageInfo.temOutrosTamanhos) {
       verdict = 'fake';
-    } else if (pageInfo.temSimilar || count > 0) {
+    } else if (pageInfo.temSimilar) {
       verdict = 'similar';
     } else {
       verdict = 'notfound';
