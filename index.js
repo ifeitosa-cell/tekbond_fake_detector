@@ -86,10 +86,12 @@ app.post('/verify', verifyLimiter, async (req, res) => {
 
   // F-14: valida magic bytes para garantir que é imagem real
   try {
-    const buf = Buffer.from(image.slice(0, 12), 'base64');
+    const buf = Buffer.from(image.slice(0, 16), 'base64');
     const isJpeg = buf[0] === 0xFF && buf[1] === 0xD8;
     const isPng  = buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4E && buf[3] === 0x47;
-    const isWebp = buf[8] === 0x57 && buf[9] === 0x45 && buf[10] === 0x42 && buf[11] === 0x50;
+    // WEBP: bytes 0-3 = "RIFF", bytes 8-11 = "WEBP"
+    const isWebp = buf[0] === 0x52 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x46 &&
+                   buf[8] === 0x57 && buf[9] === 0x45 && buf[10] === 0x42 && buf[11] === 0x50;
     if (!isJpeg && !isPng && !isWebp) {
       return res.status(400).json({ error: 'invalid_image_type' });
     }
@@ -103,7 +105,43 @@ app.post('/verify', verifyLimiter, async (req, res) => {
   runSearch(jobId, image);
 });
 
-app.post('/share', shareLimiter, (req, res) => {
+// rota para forçar busca direta no Bing
+app.post('/verify-bing', verifyLimiter, async (req, res) => {
+  const { image } = req.body;
+  if (!image || typeof image !== 'string') {
+    return res.status(400).json({ error: 'Imagem ausente' });
+  }
+  if (image.length > 14 * 1024 * 1024) {
+    return res.status(400).json({ error: 'image_too_large' });
+  }
+  try {
+    const buf = Buffer.from(image.slice(0, 16), 'base64');
+    const isJpeg = buf[0] === 0xFF && buf[1] === 0xD8;
+    const isPng  = buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4E && buf[3] === 0x47;
+    const isWebp = buf[0] === 0x52 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x46 &&
+                   buf[8] === 0x57 && buf[9] === 0x45 && buf[10] === 0x42 && buf[11] === 0x50;
+    if (!isJpeg && !isPng && !isWebp) {
+      return res.status(400).json({ error: 'invalid_image_type' });
+    }
+  } catch {
+    return res.status(400).json({ error: 'invalid_base64' });
+  }
+  const jobId = crypto.randomUUID();
+  jobs[jobId] = { status: 'processing' };
+  res.json({ jobId });
+
+  // roda busca apenas no Bing
+  const tmpPath = path.join('/tmp', jobId + '.jpg');
+  try {
+    fs.writeFileSync(tmpPath, Buffer.from(image, 'base64'));
+    const result = await searchWithRetry(tmpPath, 3, 'bing');
+    jobs[jobId] = { status: 'done', engine: 'bing', ...result };
+  } catch (err) {
+    jobs[jobId] = { status: 'error', message: err.message };
+  } finally {
+    if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath);
+  }
+});
   const { result, imagePreview } = req.body;
   if (!result) return res.status(400).json({ error: 'Resultado ausente' });
   const shareId = crypto.randomBytes(6).toString('hex');
