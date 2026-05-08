@@ -264,54 +264,46 @@ async function searchBing(filePath) {
     await page.goto('https://www.bing.com/images/search?view=detailv2&iss=sbi', { waitUntil: 'networkidle', timeout: 20000 });
     await page.waitForTimeout(2000);
 
-    // tenta múltiplos seletores
-    const seletores = [
-      'input[type="file"]',
-      '#sb_imgupload',
-      '.bi_uploadFileInput',
-      'input[name="fileinput"]',
-      '[aria-label*="upload"]',
-      '[aria-label*="Upload"]',
-    ];
+    // seletor confirmado pelo diagnóstico
+    const fileInput = await page.$('#sb_fileinput');
+    if (!fileInput) throw new Error('Seletor #sb_fileinput nao encontrado no Bing');
 
-    let uploaded = false;
-    for (const sel of seletores) {
-      try {
-        const el = await page.$(sel);
-        if (el) {
-          console.log('[bing] seletor encontrado:', sel);
-          await el.setInputFiles(filePath);
-          uploaded = true;
-          break;
-        }
-      } catch (e) {
-        console.log('[bing] seletor falhou:', sel, e.message);
-      }
-    }
-
-    // fallback: procura qualquer input file na página
-    if (!uploaded) {
-      const inputs = await page.$$('input[type="file"]');
-      if (inputs.length > 0) {
-        console.log('[bing] usando input[type=file] genérico, total encontrados:', inputs.length);
-        await inputs[0].setInputFiles(filePath);
-        uploaded = true;
-      }
-    }
-
-    if (!uploaded) throw new Error('Nenhum seletor de upload encontrado no Bing');
-
+    console.log('[bing] seletor #sb_fileinput encontrado, fazendo upload...');
+    await fileInput.setInputFiles(filePath);
     await page.waitForNavigation({ waitUntil: 'networkidle', timeout: 25000 });
-    console.log('[bing] URL:', page.url());
+    console.log('[bing] URL apos upload:', page.url());
 
-    const results = await page.$$eval('.richcap, .b_attribution, .iuscp', els =>
+    // aguarda resultados carregarem
+    await page.waitForTimeout(2000);
+
+    // extrai resultados de sites onde a imagem foi encontrada
+    let results = await page.$$eval('.richcap, .b_attribution', els =>
       els.slice(0, 13).map(el => ({
         title: el.querySelector('a')?.innerText || el.innerText || '',
         url:   el.querySelector('a')?.href || '',
-        site:  el.querySelector('.trgr_icon ~ span, .ite_ip')?.innerText || '',
-        thumb: el.closest('.iusc')?.querySelector('img')?.src || '',
+        site:  (() => { try { return new URL(el.querySelector('a')?.href || '').hostname; } catch(e) { return ''; } })(),
+        thumb: el.closest('.iusc, .imgpt')?.querySelector('img')?.src || '',
       })).filter(r => r.url)
     ).catch(() => []);
+
+    // fallback: tenta seletor alternativo
+    if (results.length === 0) {
+      results = await page.$$eval('.iusc', els =>
+        els.slice(0, 13).map(el => {
+          try {
+            const m = el.getAttribute('m') || '{}';
+            const data = JSON.parse(m);
+            return {
+              title: data.t || '',
+              url:   data.purl || data.surl || '',
+              site:  (() => { try { return new URL(data.purl || data.surl || '').hostname; } catch(e) { return ''; } })(),
+              thumb: el.querySelector('img')?.src || '',
+            };
+          } catch(e) { return null; }
+        }).filter(r => r && r.url)
+      ).catch(() => []);
+      console.log('[bing] resultados via .iusc:', results.length);
+    }
 
     const thumbs = await page.$$eval(
       '.iusc img, .richImgLnk img',
