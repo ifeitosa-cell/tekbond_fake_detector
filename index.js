@@ -11,26 +11,19 @@ const app = express();
 app.disable('x-powered-by');
 
 app.use(cors({
-  origin: [
-    'https://ifeitosa-cell.github.io',
-    'http://localhost:3000',
-    'null'
-  ],
+  origin: ['https://ifeitosa-cell.github.io', 'http://localhost:3000', 'null'],
   methods: ['GET', 'POST'],
   maxAge: 600
 }));
 
 const verifyLimiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: 10,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { error: 'too_many_requests', message: 'Limite de 10 verificacoes por minuto atingido.' }
+  windowMs: 60 * 1000, max: 10,
+  standardHeaders: true, legacyHeaders: false,
+  message: { error: 'too_many_requests' }
 });
 
 const shareLimiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: 20,
+  windowMs: 60 * 1000, max: 20,
   message: { error: 'too_many_requests' }
 });
 
@@ -39,9 +32,40 @@ app.use(express.json({ limit: '15mb' }));
 const jobs = {};
 const shares = {};
 
-// health check
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', uptime: process.uptime() });
+});
+
+// diagnóstico do Bing — descobre seletores disponíveis
+app.get('/diagnostico-bing', async (req, res) => {
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage();
+  try {
+    await page.setExtraHTTPHeaders({
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+      'Accept-Language': 'en-US,en;q=0.9',
+    });
+    await page.goto('https://www.bing.com/images/search?view=detailv2&iss=sbi', { waitUntil: 'networkidle', timeout: 20000 });
+    await page.waitForTimeout(2000);
+
+    const url = page.url();
+    const seletores = await page.$$eval(
+      'input, button, [role="button"], label, [class*="upload"], [class*="file"], [class*="camera"], [id*="upload"], [id*="file"]',
+      els => els.map(el => ({
+        tag: el.tagName,
+        type: el.type || '',
+        id: el.id || '',
+        className: el.className.substring(0, 120),
+        name: el.name || '',
+      }))
+    );
+
+    await browser.close();
+    res.json({ url, seletores });
+  } catch (err) {
+    await browser.close();
+    res.json({ erro: err.message });
+  }
 });
 
 app.get('/test-playwright', async (req, res) => {
@@ -59,9 +83,7 @@ app.get('/test-playwright', async (req, res) => {
 
 app.get('/result/:id', (req, res) => {
   const id = req.params.id;
-  if (!/^[a-f0-9\-]{6,36}$/.test(id)) {
-    return res.status(400).json({ error: 'id_invalido' });
-  }
+  if (!/^[a-f0-9\-]{6,36}$/.test(id)) return res.status(400).json({ error: 'id_invalido' });
   const job = jobs[id];
   if (!job) return res.status(404).json({ error: 'Job nao encontrado' });
   res.json(job);
@@ -77,9 +99,7 @@ function validateImage(image) {
     const isWebp = buf[0] === 0x52 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x46 &&
                    buf[8] === 0x57 && buf[9] === 0x45 && buf[10] === 0x42 && buf[11] === 0x50;
     if (!isJpeg && !isPng && !isWebp) return { error: 'invalid_image_type' };
-  } catch {
-    return { error: 'invalid_base64' };
-  }
+  } catch { return { error: 'invalid_base64' }; }
   return null;
 }
 
@@ -105,11 +125,7 @@ app.post('/share', shareLimiter, (req, res) => {
   const { result, imagePreview } = req.body;
   if (!result) return res.status(400).json({ error: 'Resultado ausente' });
   const shareId = crypto.randomBytes(6).toString('hex');
-  shares[shareId] = {
-    result,
-    imagePreview: imagePreview || null,
-    createdAt: new Date().toISOString()
-  };
+  shares[shareId] = { result, imagePreview: imagePreview || null, createdAt: new Date().toISOString() };
   res.json({ shareId });
 });
 
@@ -125,7 +141,6 @@ async function runSearch(jobId, base64Image, forceEngine) {
   const tmpPath = path.join('/tmp', jobId + '.jpg');
   try {
     fs.writeFileSync(tmpPath, Buffer.from(base64Image, 'base64'));
-
     let result = null;
     let engine = forceEngine || 'yandex';
 
@@ -140,12 +155,11 @@ async function runSearch(jobId, base64Image, forceEngine) {
         result = await searchWithRetry(tmpPath, 2, 'bing');
       }
       if (result.count === 0) {
-        console.log('Yandex sem resultados, tentando Bing...');
         try {
           const bingResult = await searchWithRetry(tmpPath, 2, 'bing');
           if (bingResult.count > 0) { engine = 'bing'; result = bingResult; }
         } catch (e) {
-          console.log('Bing tambem sem resultados:', e.message);
+          console.log('Bing sem resultados:', e.message);
         }
       }
     }
@@ -161,9 +175,7 @@ async function runSearch(jobId, base64Image, forceEngine) {
 async function searchWithRetry(filePath, attempts, engine) {
   for (let i = 0; i < attempts; i++) {
     try {
-      return engine === 'bing'
-        ? await searchBing(filePath)
-        : await searchYandex(filePath);
+      return engine === 'bing' ? await searchBing(filePath) : await searchYandex(filePath);
     } catch (err) {
       console.log('[' + engine + '] Tentativa ' + (i+1) + ' falhou:', err.message);
       if (i === attempts - 1) throw err;
@@ -190,10 +202,7 @@ function sanitizeResult(results) {
 }
 
 async function searchYandex(filePath) {
-  const browser = await chromium.launch({
-    headless: true,
-    args: ['--no-sandbox', '--disable-setuid-sandbox']
-  });
+  const browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
   const page = await browser.newPage();
   try {
     await page.setExtraHTTPHeaders({
@@ -236,21 +245,16 @@ async function searchYandex(filePath) {
     ).catch(() => []);
 
     const sanitized = sanitizeResult(results);
-    const safeThumbs = thumbs.filter(isSafeHttpUrl);
     const count = sanitized.length;
-    const verdict = count > 0 ? 'fake' : 'notfound';
-    console.log('[yandex] verdict:', verdict, '| count:', count);
-    return { verdict, count, results: sanitized, thumbs: safeThumbs };
+    console.log('[yandex] verdict:', count > 0 ? 'fake' : 'notfound', '| count:', count);
+    return { verdict: count > 0 ? 'fake' : 'notfound', count, results: sanitized, thumbs: thumbs.filter(isSafeHttpUrl) };
   } finally {
     await browser.close();
   }
 }
 
 async function searchBing(filePath) {
-  const browser = await chromium.launch({
-    headless: true,
-    args: ['--no-sandbox', '--disable-setuid-sandbox']
-  });
+  const browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
   const page = await browser.newPage();
   try {
     await page.setExtraHTTPHeaders({
@@ -258,20 +262,40 @@ async function searchBing(filePath) {
       'Accept-Language': 'en-US,en;q=0.9',
     });
     await page.goto('https://www.bing.com/images/search?view=detailv2&iss=sbi', { waitUntil: 'networkidle', timeout: 20000 });
-    await page.waitForTimeout(1500);
+    await page.waitForTimeout(2000);
 
-    const seletores = ['input[type="file"]', '#sb_imgupload', '.bi_uploadFileInput'];
+    // tenta múltiplos seletores
+    const seletores = [
+      'input[type="file"]',
+      '#sb_imgupload',
+      '.bi_uploadFileInput',
+      'input[name="fileinput"]',
+      '[aria-label*="upload"]',
+      '[aria-label*="Upload"]',
+    ];
+
     let uploaded = false;
     for (const sel of seletores) {
       try {
         const el = await page.$(sel);
         if (el) {
+          console.log('[bing] seletor encontrado:', sel);
           await el.setInputFiles(filePath);
           uploaded = true;
           break;
         }
       } catch (e) {
         console.log('[bing] seletor falhou:', sel, e.message);
+      }
+    }
+
+    // fallback: procura qualquer input file na página
+    if (!uploaded) {
+      const inputs = await page.$$('input[type="file"]');
+      if (inputs.length > 0) {
+        console.log('[bing] usando input[type=file] genérico, total encontrados:', inputs.length);
+        await inputs[0].setInputFiles(filePath);
+        uploaded = true;
       }
     }
 
@@ -295,11 +319,9 @@ async function searchBing(filePath) {
     ).catch(() => []);
 
     const sanitized = sanitizeResult(results);
-    const safeThumbs = thumbs.filter(isSafeHttpUrl);
     const count = sanitized.length;
-    const verdict = count > 0 ? 'fake' : 'notfound';
-    console.log('[bing] verdict:', verdict, '| count:', count);
-    return { verdict, count, results: sanitized, thumbs: safeThumbs };
+    console.log('[bing] verdict:', count > 0 ? 'fake' : 'notfound', '| count:', count);
+    return { verdict: count > 0 ? 'fake' : 'notfound', count, results: sanitized, thumbs: thumbs.filter(isSafeHttpUrl) };
   } finally {
     await browser.close();
   }
