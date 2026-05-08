@@ -7,7 +7,6 @@ const cors = require('cors');
 const rateLimit = require('express-rate-limit');
 
 const app = express();
-
 app.disable('x-powered-by');
 
 app.use(cors({
@@ -36,38 +35,6 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', uptime: process.uptime() });
 });
 
-// diagnóstico do Bing — descobre seletores disponíveis
-app.get('/diagnostico-bing', async (req, res) => {
-  const browser = await chromium.launch({ headless: true });
-  const page = await browser.newPage();
-  try {
-    await page.setExtraHTTPHeaders({
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-      'Accept-Language': 'en-US,en;q=0.9',
-    });
-    await page.goto('https://www.bing.com/images/search?view=detailv2&iss=sbi', { waitUntil: 'networkidle', timeout: 20000 });
-    await page.waitForTimeout(2000);
-
-    const url = page.url();
-    const seletores = await page.$$eval(
-      'input, button, [role="button"], label, [class*="upload"], [class*="file"], [class*="camera"], [id*="upload"], [id*="file"]',
-      els => els.map(el => ({
-        tag: el.tagName,
-        type: el.type || '',
-        id: el.id || '',
-        className: el.className.substring(0, 120),
-        name: el.name || '',
-      }))
-    );
-
-    await browser.close();
-    res.json({ url, seletores });
-  } catch (err) {
-    await browser.close();
-    res.json({ erro: err.message });
-  }
-});
-
 app.get('/test-playwright', async (req, res) => {
   try {
     const browser = await chromium.launch({ headless: true });
@@ -76,9 +43,7 @@ app.get('/test-playwright', async (req, res) => {
     const title = await page.title();
     await browser.close();
     res.json({ ok: true, title });
-  } catch (err) {
-    res.json({ ok: false, error: err.message });
-  }
+  } catch (err) { res.json({ ok: false, error: err.message }); }
 });
 
 app.get('/result/:id', (req, res) => {
@@ -89,17 +54,20 @@ app.get('/result/:id', (req, res) => {
   res.json(job);
 });
 
+function getMimeFromBase64(base64) {
+  try {
+    const buf = Buffer.from(base64.slice(0, 16), 'base64');
+    if (buf[0] === 0xFF && buf[1] === 0xD8) return 'image/jpeg';
+    if (buf[0] === 0x89 && buf[1] === 0x50) return 'image/png';
+    if (buf[0] === 0x52 && buf[1] === 0x49 && buf[8] === 0x57) return 'image/webp';
+    return null;
+  } catch { return null; }
+}
+
 function validateImage(image) {
   if (!image || typeof image !== 'string') return { error: 'Imagem ausente' };
   if (image.length > 14 * 1024 * 1024) return { error: 'image_too_large' };
-  try {
-    const buf = Buffer.from(image.slice(0, 16), 'base64');
-    const isJpeg = buf[0] === 0xFF && buf[1] === 0xD8;
-    const isPng  = buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4E && buf[3] === 0x47;
-    const isWebp = buf[0] === 0x52 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x46 &&
-                   buf[8] === 0x57 && buf[9] === 0x45 && buf[10] === 0x42 && buf[11] === 0x50;
-    if (!isJpeg && !isPng && !isWebp) return { error: 'invalid_image_type' };
-  } catch { return { error: 'invalid_base64' }; }
+  if (!getMimeFromBase64(image)) return { error: 'invalid_image_type' };
   return null;
 }
 
@@ -109,16 +77,55 @@ app.post('/verify', verifyLimiter, async (req, res) => {
   const jobId = crypto.randomUUID();
   jobs[jobId] = { status: 'processing' };
   res.json({ jobId });
-  runSearch(jobId, req.body.image, null);
+  runSearch(jobId, req.body.image);
 });
 
-app.post('/verify-bing', verifyLimiter, async (req, res) => {
+// Rota que gera URL pública temporária da imagem e retorna link do Google Lens
+app.post('/lens-url', verifyLimiter, (req, res) => {
   const err = validateImage(req.body.image);
   if (err) return res.status(400).json(err);
-  const jobId = crypto.randomUUID();
-  jobs[jobId] = { status: 'processing' };
-  res.json({ jobId });
-  runSearch(jobId, req.body.image, 'bing');
+
+  const mime = getMimeFromBase64(req.body.image);
+  const ext = mime === 'image/png' ? 'png' : mime === 'image/webp' ? 'webp' : 'jpg';
+  const id = crypto.randomBytes(16).toString('hex'); // 32 chars — inviável de adivinhar
+  const tmpPath = path.join('/tmp', `lens_${id}.${ext}`);
+
+  try {
+    fs.writeFileSync(tmpPath, Buffer.from(req.body.image, 'base64'));
+  } catch (writeErr) {
+    return res.status(500).json({ error: 'Erro ao salvar imagem temporária' });
+  }
+
+  // expira em 90 segundos — tempo suficiente para o Google buscar
+  const timer = setTimeout(() => {
+    try { if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath); } catch {}
+  }, 90000);
+  // evita que o timer mantenha o processo vivo
+  if (timer.unref) timer.unref();
+
+  const imageUrl = `https://tekbondfakedetector-production.up.railway.app/img/${id}.${ext}`;
+  const lensUrl = `https://lens.google.com/uploadbyurl?url=${encodeURIComponent(imageUrl)}`;
+
+  console.log('[lens-url] gerado:', imageUrl);
+  res.json({ lensUrl, imageUrl });
+});
+
+// Serve a imagem temporária para o Google Lens buscar
+app.get('/img/:filename', (req, res) => {
+  // sanitiza: apenas hex + extensão conhecida
+  const filename = req.params.filename;
+  if (!/^[a-f0-9]{32}\.(jpg|jpeg|png|webp)$/.test(filename)) {
+    return res.status(400).send('Invalid');
+  }
+  const filePath = path.join('/tmp', `lens_${filename}`);
+  if (!fs.existsSync(filePath)) {
+    return res.status(404).send('Imagem expirada ou nao encontrada');
+  }
+  const ext = filename.split('.').pop();
+  const mimeMap = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp' };
+  res.setHeader('Content-Type', mimeMap[ext] || 'image/jpeg');
+  res.setHeader('Cache-Control', 'public, max-age=90');
+  res.sendFile(filePath);
 });
 
 app.post('/share', shareLimiter, (req, res) => {
@@ -137,47 +144,24 @@ app.get('/share/:id', (req, res) => {
   res.json(share);
 });
 
-async function runSearch(jobId, base64Image, forceEngine) {
+async function runSearch(jobId, base64Image) {
   const tmpPath = path.join('/tmp', jobId + '.jpg');
   try {
     fs.writeFileSync(tmpPath, Buffer.from(base64Image, 'base64'));
-    let result = null;
-    let engine = forceEngine || 'yandex';
-
-    if (forceEngine === 'bing') {
-      result = await searchWithRetry(tmpPath, 3, 'bing');
-    } else {
-      try {
-        result = await searchWithRetry(tmpPath, 3, 'yandex');
-      } catch (yandexErr) {
-        console.log('Yandex falhou, tentando Bing:', yandexErr.message);
-        engine = 'bing';
-        result = await searchWithRetry(tmpPath, 2, 'bing');
-      }
-      if (result.count === 0) {
-        try {
-          const bingResult = await searchWithRetry(tmpPath, 2, 'bing');
-          if (bingResult.count > 0) { engine = 'bing'; result = bingResult; }
-        } catch (e) {
-          console.log('Bing sem resultados:', e.message);
-        }
-      }
-    }
-
-    jobs[jobId] = { status: 'done', engine, ...result };
+    const result = await searchWithRetry(tmpPath, 3);
+    jobs[jobId] = { status: 'done', engine: 'yandex', ...result };
   } catch (err) {
     jobs[jobId] = { status: 'error', message: err.message };
   } finally {
-    if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath);
+    try { if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath); } catch {}
   }
 }
 
-async function searchWithRetry(filePath, attempts, engine) {
+async function searchWithRetry(filePath, attempts) {
   for (let i = 0; i < attempts; i++) {
-    try {
-      return engine === 'bing' ? await searchBing(filePath) : await searchYandex(filePath);
-    } catch (err) {
-      console.log('[' + engine + '] Tentativa ' + (i+1) + ' falhou:', err.message);
+    try { return await searchYandex(filePath); }
+    catch (err) {
+      console.log('Tentativa ' + (i+1) + ' falhou:', err.message);
       if (i === attempts - 1) throw err;
       await new Promise(r => setTimeout(r, 3000 * (i + 1)));
     }
@@ -186,10 +170,8 @@ async function searchWithRetry(filePath, attempts, engine) {
 
 function isSafeHttpUrl(input) {
   if (!input || typeof input !== 'string') return false;
-  try {
-    const u = new URL(input);
-    return u.protocol === 'http:' || u.protocol === 'https:';
-  } catch { return false; }
+  try { const u = new URL(input); return u.protocol === 'http:' || u.protocol === 'https:'; }
+  catch { return false; }
 }
 
 function sanitizeResult(results) {
@@ -211,14 +193,11 @@ async function searchYandex(filePath) {
     });
     await page.goto('https://yandex.ru/images/', { waitUntil: 'networkidle', timeout: 20000 });
     await page.waitForTimeout(1500);
-
     const fileInput = await page.$('input.CbirCore-FileInput');
     if (!fileInput) throw new Error('Seletor CbirCore-FileInput nao encontrado');
-
     await fileInput.setInputFiles(filePath);
     await page.waitForNavigation({ waitUntil: 'networkidle', timeout: 25000 });
     console.log('[yandex] URL:', page.url());
-
     let results = await page.$$eval('.serp-item', els =>
       els.slice(0, 13).map(el => ({
         title: el.querySelector('.serp-item__title')?.innerText || '',
@@ -227,7 +206,6 @@ async function searchYandex(filePath) {
         thumb: el.querySelector('img')?.src || '',
       }))
     );
-
     if (results.length === 0) {
       results = await page.$$eval('.CbirSites-Item', els =>
         els.slice(0, 13).map(el => ({
@@ -238,81 +216,13 @@ async function searchYandex(filePath) {
         }))
       );
     }
-
     const thumbs = await page.$$eval(
       '.CbirOtherSizes-Item img, .other-sizes__item img, .cbir-similar__item img, .ImagesApp-SerpItem img',
       imgs => imgs.slice(0, 5).map(img => img.src || '')
     ).catch(() => []);
-
     const sanitized = sanitizeResult(results);
     const count = sanitized.length;
     console.log('[yandex] verdict:', count > 0 ? 'fake' : 'notfound', '| count:', count);
-    return { verdict: count > 0 ? 'fake' : 'notfound', count, results: sanitized, thumbs: thumbs.filter(isSafeHttpUrl) };
-  } finally {
-    await browser.close();
-  }
-}
-
-async function searchBing(filePath) {
-  const browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
-  const page = await browser.newPage();
-  try {
-    await page.setExtraHTTPHeaders({
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-      'Accept-Language': 'en-US,en;q=0.9',
-    });
-    await page.goto('https://www.bing.com/images/search?view=detailv2&iss=sbi', { waitUntil: 'networkidle', timeout: 20000 });
-    await page.waitForTimeout(2000);
-
-    // seletor confirmado pelo diagnóstico
-    const fileInput = await page.$('#sb_fileinput');
-    if (!fileInput) throw new Error('Seletor #sb_fileinput nao encontrado no Bing');
-
-    console.log('[bing] seletor #sb_fileinput encontrado, fazendo upload...');
-    await fileInput.setInputFiles(filePath);
-    await page.waitForNavigation({ waitUntil: 'networkidle', timeout: 25000 });
-    console.log('[bing] URL apos upload:', page.url());
-
-    // aguarda resultados carregarem
-    await page.waitForTimeout(2000);
-
-    // extrai resultados de sites onde a imagem foi encontrada
-    let results = await page.$$eval('.richcap, .b_attribution', els =>
-      els.slice(0, 13).map(el => ({
-        title: el.querySelector('a')?.innerText || el.innerText || '',
-        url:   el.querySelector('a')?.href || '',
-        site:  (() => { try { return new URL(el.querySelector('a')?.href || '').hostname; } catch(e) { return ''; } })(),
-        thumb: el.closest('.iusc, .imgpt')?.querySelector('img')?.src || '',
-      })).filter(r => r.url)
-    ).catch(() => []);
-
-    // fallback: tenta seletor alternativo
-    if (results.length === 0) {
-      results = await page.$$eval('.iusc', els =>
-        els.slice(0, 13).map(el => {
-          try {
-            const m = el.getAttribute('m') || '{}';
-            const data = JSON.parse(m);
-            return {
-              title: data.t || '',
-              url:   data.purl || data.surl || '',
-              site:  (() => { try { return new URL(data.purl || data.surl || '').hostname; } catch(e) { return ''; } })(),
-              thumb: el.querySelector('img')?.src || '',
-            };
-          } catch(e) { return null; }
-        }).filter(r => r && r.url)
-      ).catch(() => []);
-      console.log('[bing] resultados via .iusc:', results.length);
-    }
-
-    const thumbs = await page.$$eval(
-      '.iusc img, .richImgLnk img',
-      imgs => imgs.slice(0, 5).map(img => img.src || '')
-    ).catch(() => []);
-
-    const sanitized = sanitizeResult(results);
-    const count = sanitized.length;
-    console.log('[bing] verdict:', count > 0 ? 'fake' : 'notfound', '| count:', count);
     return { verdict: count > 0 ? 'fake' : 'notfound', count, results: sanitized, thumbs: thumbs.filter(isSafeHttpUrl) };
   } finally {
     await browser.close();
