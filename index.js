@@ -9,6 +9,7 @@ app.use(express.json({ limit: '15mb' }));
 app.use(require('cors')());
 
 const jobs = {};
+const shares = {}; // armazena resultados para compartilhamento
 
 app.get('/test-playwright', async (req, res) => {
   try {
@@ -36,6 +37,26 @@ app.post('/verify', async (req, res) => {
   jobs[jobId] = { status: 'processing' };
   res.json({ jobId });
   runSearch(jobId, image);
+});
+
+// salva resultado para compartilhamento e retorna shareId
+app.post('/share', (req, res) => {
+  const { result, imagePreview } = req.body;
+  if (!result) return res.status(400).json({ error: 'Resultado ausente' });
+  const shareId = crypto.randomBytes(6).toString('hex'); // ex: a3f9c2
+  shares[shareId] = {
+    result,
+    imagePreview: imagePreview || null,
+    createdAt: new Date().toISOString(),
+  };
+  res.json({ shareId });
+});
+
+// retorna resultado compartilhado
+app.get('/share/:id', (req, res) => {
+  const share = shares[req.params.id];
+  if (!share) return res.status(404).json({ error: 'Link expirado ou invalido' });
+  res.json(share);
 });
 
 async function runSearch(jobId, base64Image) {
