@@ -35,6 +35,49 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', uptime: process.uptime() });
 });
 
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok', uptime: process.uptime() });
+});
+
+app.post('/diagnostico-yandex', verifyLimiter, async (req, res) => {
+  const err = validateImage(req.body.image);
+  if (err) return res.status(400).json(err);
+  const tmpPath = require('path').join('/tmp', 'diag_' + Date.now() + '.jpg');
+  require('fs').writeFileSync(tmpPath, Buffer.from(req.body.image, 'base64'));
+  const browser = await chromium.launch({ headless: true, args: ['--no-sandbox'] });
+  const page = await browser.newPage();
+  try {
+    await page.setExtraHTTPHeaders({ 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36' });
+    await page.goto('https://yandex.ru/images/', { waitUntil: 'networkidle', timeout: 20000 });
+    await page.waitForTimeout(1500);
+    const fileInput = await page.$('input.CbirCore-FileInput');
+    await fileInput.setInputFiles(tmpPath);
+    await page.waitForNavigation({ waitUntil: 'networkidle', timeout: 25000 });
+    const diagnostico = await page.evaluate(() => {
+      const secoes = {};
+      document.querySelectorAll('[class*="cbir"], [class*="Cbir"], [class*="serp"]').forEach(el => {
+        const c = el.className.split(' ')[0];
+        if (c) secoes[c] = (secoes[c] || 0) + 1;
+      });
+      return {
+        url: window.location.href,
+        titulos: Array.from(document.querySelectorAll('h2, h3, [class*="title"]')).slice(0, 10).map(e => e.innerText?.trim()).filter(Boolean),
+        secoes,
+        temCbirSites: !!document.querySelector('.CbirSites, .cbir-sites'),
+        temSerpItem: !!document.querySelector('.serp-item'),
+        temSimilar: !!document.querySelector('[class*="similar"], [class*="Similar"]'),
+        htmlSnippet: document.body.innerHTML.substring(0, 3000)
+      };
+    });
+    res.json(diagnostico);
+  } finally {
+    await browser.close();
+    try { require('fs').unlinkSync(tmpPath); } catch {}
+  }
+});
+
+app.get('/test-playwright', async (req, res) => {
+
 app.get('/test-playwright', async (req, res) => {
   try {
     const browser = await chromium.launch({ headless: true });
