@@ -186,7 +186,8 @@ async function searchYandex(filePath) {
     await page.waitForNavigation({ waitUntil: 'networkidle', timeout: 25000 });
     console.log('[yandex] URL:', page.url());
 
-    const finalUrl = page.url();
+    const yandexUrl = page.url();
+    const finalUrl = yandexUrl;
 
     // Diferenciação por URL — o Yandex usa cbir_page para indicar o tipo:
     // cbir_page=similar        → só similares (SIMILAR)
@@ -248,7 +249,7 @@ async function searchYandex(filePath) {
     }
 
     console.log('[yandex] verdict:', verdict, '| count:', count);
-    return { verdict, count, results: sanitized, thumbs: thumbs.filter(isSafeHttpUrl) };
+    return { verdict, count, results: sanitized, thumbs: thumbs.filter(isSafeHttpUrl), yandexUrl };
   } finally {
     await browser.close();
   }
