@@ -10,9 +10,10 @@ const app = express();
 app.disable('x-powered-by');
 
 app.use(cors({
-  origin: ['https://ifeitosa-cell.github.io', 'http://localhost:3000', 'null'],
+  origin: ['https://ifeitosa-cell.github.io', 'https://antich3at.github.io', 'http://localhost:3000', 'null'],
   methods: ['GET', 'POST'],
   maxAge: 600
+}));
 }));
 
 const verifyLimiter = rateLimit({
