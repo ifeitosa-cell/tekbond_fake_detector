@@ -10,10 +10,14 @@ const app = express();
 app.disable('x-powered-by');
 
 app.use(cors({
-  origin: ['https://ifeitosa-cell.github.io', 'https://antich3at.github.io', 'http://localhost:3000', 'https://antich3at.github.io/painel-moderacao'],
+  origin: [
+    'https://ifeitosa-cell.github.io',
+    'https://antich3at.github.io',
+    'http://localhost:3000',
+    'null'
+  ],
   methods: ['GET', 'POST'],
   maxAge: 600
-}));
 }));
 
 const verifyLimiter = rateLimit({
@@ -81,7 +85,6 @@ app.post('/verify', verifyLimiter, async (req, res) => {
   runSearch(jobId, req.body.image);
 });
 
-// URL temporária para abrir no Google Lens
 app.post('/lens-url', verifyLimiter, (req, res) => {
   const err = validateImage(req.body.image);
   if (err) return res.status(400).json(err);
@@ -185,17 +188,10 @@ async function searchYandex(filePath) {
     if (!fileInput) throw new Error('Seletor CbirCore-FileInput nao encontrado');
     await fileInput.setInputFiles(filePath);
     await page.waitForNavigation({ waitUntil: 'networkidle', timeout: 25000 });
-    console.log('[yandex] URL:', page.url());
 
     const yandexUrl = page.url();
-    const finalUrl = yandexUrl;
-
-    // Diferenciação por URL — o Yandex usa cbir_page para indicar o tipo:
-    // cbir_page=similar        → só similares (SIMILAR)
-    // sem cbir_page=similar    → correspondência real (FAKE)
-    // "В других размерах"     → mesma imagem em outros tamanhos (FAKE)
-    const isSimilarPage = finalUrl.includes('cbir_page=similar');
-    console.log('[yandex] isSimilarPage:', isSimilarPage, '| url:', finalUrl);
+    const isSimilarPage = yandexUrl.includes('cbir_page=similar');
+    console.log('[yandex] isSimilarPage:', isSimilarPage, '| url:', yandexUrl);
 
     const pageInfo = await page.evaluate(() => {
       const texto = document.body.innerText || '';
@@ -206,7 +202,6 @@ async function searchYandex(filePath) {
     });
     console.log('[yandex] pageInfo:', JSON.stringify(pageInfo));
 
-    // Extrai resultados de sites (correspondência exata)
     let results = await page.$$eval('.serp-item', els =>
       els.slice(0, 13).map(el => ({
         title: el.querySelector('.serp-item__title')?.innerText || '',
@@ -234,10 +229,6 @@ async function searchYandex(filePath) {
     const sanitized = sanitizeResult(results);
     const count = sanitized.length;
 
-    // 3 vereditos baseados em sinais objetivos do Yandex:
-    // FAKE     → "В других размерах" na página = mesma imagem em outros tamanhos
-    // SIMILAR  → cbir_page=similar na URL = apenas imagens parecidas
-    // NOTFOUND → nenhum sinal relevante encontrado
     let verdict;
     if (isSimilarPage) {
       verdict = 'similar';
